@@ -4,10 +4,10 @@ $_ENV['OAUTH2_CLIENT_ID'] = 'your-oauth-client';
 $_ENV['OAUTH_CLIENT_SECRET'] = 'your-oauth-secret';
 $_ENV['OAUTH2_REDIRECT_URI'] = 'http://your-freepbx-server/ucp/customsso.php';
 
-$_ENV['OAUTH2_OPENID_CONFIG_URL'] = '{your-oauth-server-authorization}/.well-known/openid-configuration'; // Optional to fetch the OpenID configuration OR:
-$_ENV['OAUTH2_AUTHORIZATION_URL'] = 'your-oauth-server-authorization-url'; // Instead of fetching the OpenID configuration
-$_ENV['OAUTH2_TOKEN_URL'] = 'your-oauth-server-token-url'; // Instead of fetching the OpenID configuration
-$_ENV['OAUTH2_JWKS_URL'] = 'your-oauth-server-jwks-url'; // Instead of fetching the OpenID configuration
+$_ENV['OAUTH2_OPENID_CONFIG_URL'] = '{your-oauth-server}/.well-known/openid-configuration'; // Optional to fetch the OpenID configuration OR:
+$_ENV['OAUTH2_AUTHORIZATION_URL'] = 'your-oauth-server-authorization-url';
+$_ENV['OAUTH2_TOKEN_URL'] = 'your-oauth-server-token-url';
+$_ENV['OAUTH2_JWKS_URL'] = 'your-oauth-server-jwks-url';
 $_ENV['KEY_SIGNING_CHECK'] = true; // Optional to check the JWT signature
 
 $_ENV['OAUTH2_SCOPE'] = 'your-oauth-scope-required-for-returning-user-profile';
@@ -90,6 +90,9 @@ function fetch_openid_configuration(){
     curl_setopt($ch, CURLOPT_URL, $_ENV['OAUTH2_OPENID_CONFIG_URL']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     $config = curl_exec($ch);
+    if (curl_errno($ch)) {
+        throw new Exception('Failed to fetch OpenID configuration: ' . curl_error($ch));
+    }
     curl_close($ch);
     if(!$config) {
         throw new Exception('Failed to fetch OpenID configuration.');
@@ -113,7 +116,7 @@ if(isset($_ENV['OAUTH2_OPENID_CONFIG_URL'])) {
     }
 }
 
-$assembled_url = $_ENV['OAUTH2_AUTHORIZATION_URL'] . '?response_type=code&client_id=' . $_ENV['OAUTH2_CLIENT_ID'] . '&redirect_uri=' . $_ENV['OAUTH2_REDIRECT_URI'] . '&scope=' . $_ENV['OAUTH2_SCOPE'];
+$assembled_url = $_ENV['OAUTH2_AUTHORIZATION_URL'].'?response_type=code&client_id='.$_ENV['OAUTH2_CLIENT_ID'].'&redirect_uri='.$_ENV['OAUTH2_REDIRECT_URI'].'&scope='.$_ENV['OAUTH2_SCOPE'];
 $error = "";
 $error_description = "";
 $additonal_info = "";
@@ -121,7 +124,7 @@ if(isset($_GET['code'])) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $_ENV['OAUTH2_TOKEN_URL']);
     curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, 'grant_type=authorization_code&code=' . $_GET['code'] . '&redirect_uri=' . $_ENV['OAUTH2_REDIRECT_URI'],);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, 'grant_type=authorization_code&code=' . $_GET['code'] . '&redirect_uri=' . $_ENV['OAUTH2_REDIRECT_URI']);
     curl_setopt($ch, CURLOPT_HTTPHEADER, array('Authorization: Basic ' . base64_encode($_ENV['OAUTH2_CLIENT_ID'] . ':' . $_ENV['OAUTH_CLIENT_SECRET'])));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     $response = curl_exec($ch);
