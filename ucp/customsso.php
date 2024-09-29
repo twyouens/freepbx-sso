@@ -3,11 +3,115 @@
 $_ENV['OAUTH2_CLIENT_ID'] = 'your-oauth-client';
 $_ENV['OAUTH_CLIENT_SECRET'] = 'your-oauth-secret';
 $_ENV['OAUTH2_REDIRECT_URI'] = 'http://your-freepbx-server/ucp/customsso.php';
-$_ENV['OAUTH2_AUTHORIZATION_URL'] = 'your-oauth-server-authorization-url';
-$_ENV['OAUTH2_TOKEN_URL'] = 'your-oauth-server-token-url';
+
+$_ENV['OAUTH2_OPENID_CONFIG_URL'] = '{your-oauth-server-authorization}/.well-known/openid-configuration'; // Optional to fetch the OpenID configuration OR:
+$_ENV['OAUTH2_AUTHORIZATION_URL'] = 'your-oauth-server-authorization-url'; // Instead of fetching the OpenID configuration
+$_ENV['OAUTH2_TOKEN_URL'] = 'your-oauth-server-token-url'; // Instead of fetching the OpenID configuration
+$_ENV['OAUTH2_JWKS_URL'] = 'your-oauth-server-jwks-url'; // Instead of fetching the OpenID configuration
+$_ENV['KEY_SIGNING_CHECK'] = true; // Optional to check the JWT signature
+
 $_ENV['OAUTH2_SCOPE'] = 'your-oauth-scope-required-for-returning-user-profile';
 $_ENV['OAUTH2_USERINFO_JWT_KEY'] = 'id_token';
 $_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY'] = 'upn';
+
+function base64url_decode($data) {
+    $urlDecodedData = str_replace(['-', '_'], ['+', '/'], $data);
+    $padding = strlen($urlDecodedData) % 4;
+    if ($padding > 0) {
+        $urlDecodedData .= str_repeat('=', 4 - $padding);
+    }
+    return base64_decode($urlDecodedData);
+}
+function base64url_encode($data) {
+    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+}
+function fetch_jwt_key($url) {
+    // Fetch the JWT keys from the URL
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $keyResponse = curl_exec($ch);
+    curl_close($ch);
+
+    // Handle response error
+    if (!$keyResponse) {
+        throw new Exception('Failed to fetch the JWT key from the URL.');
+    }
+
+    // Parse the JWK response
+    $jwk = json_decode($keyResponse, true);
+    if (isset($jwk['keys']) && count($jwk['keys']) > 0) {
+        $publicKeyJwk = $jwk['keys'][0];  // In case of multiple keys, use the first one
+
+        // Extract the certificate from the x5c field
+        if (isset($publicKeyJwk['x5c']) && count($publicKeyJwk['x5c']) > 0) {
+            $cert = $publicKeyJwk['x5c'][0]; // Use the first certificate in the chain
+
+            // Convert the certificate to PEM format
+            $pem = "-----BEGIN CERTIFICATE-----\n" . chunk_split($cert, 64) . "-----END CERTIFICATE-----\n";
+
+            return $pem;
+        } else {
+            throw new Exception('No x5c certificate found in the JWT response.');
+        }
+    } else {
+        throw new Exception('Invalid JWK format received.');
+    }
+}
+function verify_jwt_signature($jwt, $publicKeyPem) {
+    // Split the JWT into its three parts
+    list($headerEncoded, $payloadEncoded, $signatureProvided) = explode('.', $jwt);
+
+    // Base64 decode the header and payload
+    $header = json_decode(base64url_decode($headerEncoded), true);
+    $payload = json_decode(base64url_decode($payloadEncoded), true);
+
+    // Rebuild the signature base string
+    $signatureBase = $headerEncoded . '.' . $payloadEncoded;
+
+    // Check the algorithm used in the header (e.g., RS256)
+    if ($header['alg'] === 'RS256') {
+        // Verify the signature using the public key in PEM format
+        $signatureVerified = openssl_verify($signatureBase, base64url_decode($signatureProvided), $publicKeyPem, OPENSSL_ALGO_SHA256);
+
+        if ($signatureVerified === 1) {
+            return $payload; // Signature is valid
+        } elseif ($signatureVerified === 0) {
+            throw new Exception('Invalid JWT signature.');
+        } else {
+            throw new Exception('Error occurred during signature verification.');
+        }
+    } else {
+        throw new Exception('Unsupported algorithm: ' . $header['alg']);
+    }
+}
+function fetch_openid_configuration(){
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $_ENV['OAUTH2_OPENID_CONFIG_URL']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $config = curl_exec($ch);
+    curl_close($ch);
+    if(!$config) {
+        throw new Exception('Failed to fetch OpenID configuration.');
+    }
+    return json_decode($config, true);
+}
+if(isset($_ENV['OAUTH2_OPENID_CONFIG_URL'])) {
+    try {
+        $config = fetch_openid_configuration();
+        if(isset($config['authorization_endpoint'])) {
+            $_ENV['OAUTH2_AUTHORIZATION_URL'] = $config['authorization_endpoint'];
+        }
+        if(isset($config['token_endpoint'])) {
+            $_ENV['OAUTH2_TOKEN_URL'] = $config['token_endpoint'];
+        }
+        if(isset($config['jwks_uri'])) {
+            $_ENV['OAUTH2_JWKS_URL'] = $config['jwks_uri'];
+        }
+    } catch (Exception $e) {
+        echo 'Error: ' . $e->getMessage();
+    }
+}
 
 $assembled_url = $_ENV['OAUTH2_AUTHORIZATION_URL'] . '?response_type=code&client_id=' . $_ENV['OAUTH2_CLIENT_ID'] . '&redirect_uri=' . $_ENV['OAUTH2_REDIRECT_URI'] . '&scope=' . $_ENV['OAUTH2_SCOPE'];
 $error = "";
@@ -25,10 +129,31 @@ if(isset($_GET['code'])) {
     $response = json_decode($response, true);
     if(isset($response['access_token'])) {
         if(isset($_ENV['OAUTH2_USERINFO_JWT_KEY'])) {
-            $jwt = explode('.', $response[$_ENV['OAUTH2_USERINFO_JWT_KEY']]);
-            $jwt = json_decode(base64_decode($jwt[1]), true);
-            if(isset($jwt[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']])) {
-                $username = $jwt[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']];
+            $jwtToken = $response[$_ENV['OAUTH2_USERINFO_JWT_KEY']];
+            if($_ENV['KEY_SIGNING_CHECK']) {
+                try{
+                    $publicKey = fetch_jwt_key($_ENV['OAUTH2_JWKS_URL']);
+                    $jwtPayload = verify_jwt_signature($jwtToken, $publicKey);
+                    if ($jwtPayload && isset($jwtPayload[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']])) {
+                        $username = $jwtPayload[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']];
+                    }else {
+                        $error = 'username error';
+                        $error_description = 'Could not find username in JWT response. Please check your configuration.';
+                    }
+                } catch (Exception $e) {
+                    $error = 'jwt error';
+                    $error_description = $e->getMessage();
+                }
+            }else{
+                $jwtPayload = json_decode(base64url_decode(explode('.', $jwtToken)[1]), true);
+                if ($jwtPayload && isset($jwtPayload[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']])) {
+                    $username = $jwtPayload[$_ENV['OAUTH2_USERINFO_JWT_USERNAME_KEY']];
+                }else {
+                    $error = 'username error';
+                    $error_description = 'Could not find username in JWT response. Please check your configuration.';
+                }
+            }
+            if(!$error && isset($username)) {
                 ob_start();
                 $bootstrap_settings = array();
                 $bootstrap_settings['freepbx_auth'] = false;
@@ -54,11 +179,8 @@ if(isset($_GET['code'])) {
                     die();
                 }else {
                     $error = 'login error';
-                    $error_description = 'Could not log in user. Please contact your system administrator.';
+                    $error_description = 'Could not sign in user into FreePBX UCP. Please check your configuration.';
                 }
-            }else {
-                $error = 'username error';
-                $error_description = 'Could not find username in JWT response. Please check your configuration.';
             }
         }else {
             $error = 'jwt error';
@@ -99,7 +221,7 @@ if(isset($_GET['code'])) {
             <h1>Oops! An Error Occurred</h1>
             <h2><?php echo $error ?>.</h2>
             <p>
-                Sorry, there was a problem when trying to sign you in. Please try again. If this issue persists, please contact your system administrator.
+                There was a problem when trying to sign you in. Please try again. If this issue persists, please contact your system administrator.
             </p>
             <p>
                 <b>Details:</b><br><?php echo $error_description ?>
